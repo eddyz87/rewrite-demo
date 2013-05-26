@@ -1,0 +1,15 @@
+The work on actual rewrite engine had not been started yet.
+
+The code depends on the cl-yacc, cl-lex and cl-ppcre.
+The Quicklisp is used to track dependencies, see the next page for details:
+  http://www.quicklisp.org/beta/
+
+There is a not tested probability that quicklisp would load all dependencies by itself,
+in case if this is not true, manual installation looks like:
+  (ql:quickload "yacc")
+  (ql:quickload "cl-lex")
+
+To run the project issue:
+  sbcl --script init.lisp 2>&1 | less
+
+Currently it prints info on macro expansions and a result of running of very small test.
