@@ -58,6 +58,13 @@
                                                      opt-names))
   ;;        (format t "list=~A bindings=~A~%" list bindings)
           (apply #'values (cons list (mapcar #'cdr bindings)))))))
+
+    (defun print-term (stream print-table term)
+      (let ((printer (and (listp term)
+                          (gethash (car term) print-table))))
+        (if printer
+          (funcall printer stream (cdr term))
+          (print term stream))))
 )
 ;;(print (extract-options '(1 2) '(:f 2) ':g))
 ;;(print (extract-options '(1 2 :f 3 4 :g 5) '(:f 2) ':g))
@@ -71,7 +78,10 @@
    alt-el:
     rule-name | string"
   (assert (listp rules)) ;; TO DO add error messages
-  (let ((terminals (make-hash-table :test #'equal))) ;; string -> symbol
+  (let ((terminals (make-hash-table :test #'equal)) ;; string -> symbol
+        (printer-inits nil)
+        (print-table (gensym (mk-symbol-name name "-print-table")))
+        (print-func (intern (mk-symbol-name name "-print"))))
     (labels ((%terminal (str &optional (quote t))
                (let ((str (if quote
                             (cl-ppcre:quote-meta-chars str)
@@ -111,19 +121,36 @@
                                                    but ~A of type ~A found, while parsing rule ~A"
                                                   el (type-of el) base-name))))
                                     alt))
+                      (stream (gensym "stream"))
+                      (term (gensym "term"))
+                      (number 0)
+                      (printer-statements (mapcar (lambda (non-terminal notation)
+                                                    (if non-terminal
+                                                      (prog1
+                                                        `(,print-func ,stream (nth ,number ,term))
+                                                        (incf number))
+                                                      `(write-string ,notation ,stream)))
+                                                  (mapcar #'third body)
+                                                  alt))
                       (names (mapcar #'first body))
                       (xs (mapcar #'second body))
                       (ys (remove nil (mapcar #'third body))))
-               `(,@names (lambda ,xs (list ',constructor ,@ys))))))
+                 (push `(setf (gethash ',constructor ,print-table)
+                              (lambda (,stream ,term)
+                                (progn ,@printer-statements)))
+                       printer-inits)
+                 `(,@names (lambda ,xs (list ',constructor ,@ys))))))
       (let* ((rules (mapcar #'%parse-rule rules))
              (start (caar rules))
              (parser-name (gensym (mk-symbol-name name "-parser")))
              (lexer-name (gensym (mk-symbol-name name "-lexer")))
-             (parse-string-func-name (intern (mk-symbol-name name "-parse-string")))
-             (parse-stream-func-name (intern (mk-symbol-name name "-parse-stream")))
+             (parse-string-func (intern (mk-symbol-name name "-parse-string")))
+             (parse-stream-func (intern (mk-symbol-name name "-parse-stream")))
              (lexer-rules nil)
+             (term (gensym "term"))
              (str (gensym "str"))
-             (stream (gensym "stream")))
+             (stream (gensym "stream"))
+             (stream1 (gensym "stream")))
         (maphash (lambda (regex symb)
                    (push `(,regex (return (values ',symb $@)))
                          lexer-rules))
@@ -135,29 +162,32 @@
                                (:start-symbol ,start)
                                (:terminals ,(hash-values terminals))
                                ,@rules)
-           (defun ,parse-string-func-name (,str)
+           (defun ,parse-string-func (,str)
              (yacc:parse-with-lexer (,lexer-name ,str) ,parser-name))
-           (defun ,parse-stream-func-name (,stream)
+           (defun ,parse-stream-func (,stream)
              (yacc:parse-with-lexer (stream-lexer #'read-line #',lexer-name (lambda () nil) (lambda () nil) :stream ,stream)
                                     ,parser-name))
-             )))))
+           (defvar ,print-table (make-hash-table :test #'eq))
+           (progn ,@printer-inits)
+           (defun ,print-func (,stream1 ,term)
+             (print-term ,stream1 ,print-table ,term)))))))
 
 
 (defmacro print-and-expand (what)
   `(progn
-     ;;(pprint (macroexpand (quote ,what)))
+     (pprint (macroexpand (quote ,what)))
      ,what))
 
 (print-and-expand
       (defg zulu
             (expr (expr1)
-                  (expr1 "+" expr1)
-                  (expr1 "-" expr1))
+                  (expr1 "+" expr)
+                  (expr1 "-" expr))
 
             (expr1 :subtype expr
                    (expr2)
-                   (expr2 "*" expr2)
-                   (expr2 "/" expr2))
+                   (expr2 "*" expr1)
+                   (expr2 "/" expr1))
 
             (expr2 :subtype expr
                    ("(" expr ")")
@@ -168,4 +198,6 @@
             (int :value "[0-9]+")))
 
 ;;(print (zulu-parse-string "22 * 1 + 33 * 2"))
-(print (zulu-parse-string "gg * 2 + 1"))
+(let ((e (zulu-parse-string "gg * 2 + 1 + ( 211 )")))
+  (pprint e)
+  (zulu-print *standard-output* e))
