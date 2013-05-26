@@ -72,23 +72,26 @@
     rule-name | string"
   (assert (listp rules)) ;; TO DO add error messages
   (let ((terminals (make-hash-table :test #'equal))) ;; string -> symbol
-    (labels ((%terminal (str)
-                (or (gethash str terminals)
-                    (setf (gethash str terminals) (gensym str))))
+    (labels ((%terminal (str &optional (quote t))
+               (let ((str (if quote
+                            (cl-ppcre:quote-meta-chars str)
+                            str)))
+                 (or (gethash str terminals)
+                     (setf (gethash str terminals) (gensym str)))))
              (%parse-rule (rule)
                "returns rule in the cl-yacc form:
                   (rule-name alt*)"
                (assert (listp rule)) ;; TO DO add error messages
                (assert (symbolp (first rule)))
                (let ((name (car rule)))
-                 (multiple-value-bind (alts1 terminal subtype)
-                                      (extract-options (cdr rule) ':terminal '(:subtype 1))
-;;                    (format t "alts1=~A terminal=~A~%" alts1 terminal)
+                 (multiple-value-bind (alts1 value subtype)
+                                      (extract-options (cdr rule) ':value '(:subtype 1))
+;;                    (format t "alts1=~A value=~A~%" alts1 terminal)
                     (let ((alts (mapcar (lambda (a) (%parse-alt (symbol-name name) a))
-                                        (if terminal
+                                        (if value
                                           (progn
                                             (assert (stringp (car alts1)))
-                                            (list (list (%terminal (car alts1)))))
+                                            (list (list (%terminal (car alts1) nil))))
                                           alts1))))
                       `(,name ,@alts)))))
              (%parse-alt (base-name alt)
@@ -148,21 +151,21 @@
 (print-and-expand
       (defg zulu
             (expr (expr1)
-                  (expr1 "\\+" expr1)
+                  (expr1 "+" expr1)
                   (expr1 "-" expr1))
 
             (expr1 :subtype expr
                    (expr2)
-                   (expr2 "\\*" expr2)
+                   (expr2 "*" expr2)
                    (expr2 "/" expr2))
 
             (expr2 :subtype expr
-                   ("\\(" expr "\\)")
+                   ("(" expr ")")
                    (id)
                    (int))
 
-            (id :terminal "[_a-z][_a-zA-Z0-9]*")
-            (int :terminal "[0-9]+")))
+            (id :value "[_a-z][_a-zA-Z0-9]*")
+            (int :value "[0-9]+")))
 
 ;;(print (zulu-parse-string "22 * 1 + 33 * 2"))
 (print (zulu-parse-string "gg * 2 + 1"))
