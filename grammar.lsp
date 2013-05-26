@@ -11,7 +11,18 @@
              ht)
     lst))
 
-(defmacro define-parser (&rest args) `'(define-parser ,@args))
+(defun mk-symbol-name (&rest strings-or-symbols)
+  (string-upcase
+    (apply #'concatenate
+           (cons 'string
+                 (mapcar (lambda (x)
+                           (if (symbolp x)
+                             (symbol-name x)
+                             x))
+                         strings-or-symbols)))))
+
+;;(defmacro define-string-lexer (&rest args) `'(define-string-lexer ,@args))
+;;(defmacro define-parser (&rest args) `'(define-parser ,@args))
 
 ;; TO DO check for errors
 (defun extract-options (list &rest opt-names)
@@ -70,7 +81,7 @@
                (let ((name (car rule)))
                  (multiple-value-bind (alts1 terminal subtype)
                                       (extract-options (cdr rule) ':terminal '(:subtype 1))
-                    (format t "alts1=~A terminal=~A~%" alts1 terminal)
+;;                    (format t "alts1=~A terminal=~A~%" alts1 terminal)
                     (let ((alts (mapcar (lambda (a) (%parse-alt (symbol-name name) a))
                                         (if terminal
                                           (progn
@@ -100,29 +111,49 @@
                       (ys (remove nil (mapcar #'third body))))
                `(,@names (lambda ,xs (list ',constructor ,@ys))))))
       (let* ((rules (mapcar #'%parse-rule rules))
-             (start (caar rules)))
-        `(define-parser ,name
-          (:start-symbol ,start)
-          (:terminals ,(hash-values terminals))
-          ,@rules))
-      )))
+             (start (caar rules))
+             (parser-name (gensym (mk-symbol-name name "-parser")))
+             (lexer-name (gensym (mk-symbol-name name "-lexer")))
+             (parse-string-func-name (intern (mk-symbol-name name "-parse-string")))
+             (parse-stream-func-name (intern (mk-symbol-name name "-parse-stream")))
+             (lexer-rules nil)
+             (str (gensym "str"))
+             (stream (gensym "stream")))
+        (maphash (lambda (regex symb)
+                   (push `(,regex (return (values ,symb $@)))
+                         lexer-rules))
+                 terminals)
+        `(progn
+           (define-string-lexer ,lexer-name
+                                ,@lexer-rules)
+           (define-parser ,parser-name
+                          (:start-symbol ,start)
+                          (:terminals ,(hash-values terminals))
+                          ,@rules)
+           (defun ,parse-string-func-name (,str)
+             (parse-with-lexer (,lexer-name ,str) ,parser-name))
+           (defun ,parse-stream-func-name (,stream)
+             (parse-with-lexer (stream-lexer #'read-line #',lexer-name (lambda () nil) (lambda () nil) :stream ,stream)
+                               ,parser-name))
+             )))))
 
 
 (pprint
   (macroexpand
-    (defg *zulu*
-          (expr (expr1 "+" expr1)
-                (expr1 "-" expr1))
+    (quote
+      (defg zulu
+            (expr (expr1 "+" expr1)
+                  (expr1 "-" expr1))
 
-          (expr1 :subtype expr
-                 (expr2 "*" expr2)
-                 (expr2 "/" expr2))
+            (expr1 :subtype expr
+                   (expr2 "*" expr2)
+                   (expr2 "/" expr2))
 
-          (expr2 :subtype expr
-                 ("(" expr ")")
-                 (id)
-                 (int))
-          
-          (id :terminal "[_a-z][_a-zA-Z0-9]*")
-          (int :terminal "[0-9]+"))))
+            (expr2 :subtype expr
+                   ("(" expr ")")
+                   (id)
+                   (int))
+
+            (id :terminal "[_a-z][_a-zA-Z0-9]*")
+            (int :terminal "[0-9]+")))))
 
