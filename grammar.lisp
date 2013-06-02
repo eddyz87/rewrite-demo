@@ -2,7 +2,6 @@
 ;; TO DO:
 ;; unit tests ?
 
-;;(defmacro \ ((&rest args) &body body) (lambda ,args ,@body))
 (eval-when (:compile-toplevel :load-toplevel :execute)
   
   (defun hash-values (ht)
@@ -22,9 +21,6 @@
                                (symbol-name x)
                                x))
                            strings-or-symbols)))))
-  
-  ;;(defmacro define-string-lexer (&rest args) `'(define-string-lexer ,@args))
-  ;;(defmacro define-parser (&rest args) `'(define-parser ,@args))
   
   ;; TO DO check for errors
   (defun extract-options (list &rest opt-names)
@@ -64,140 +60,295 @@
                           (gethash (car term) print-table))))
         (if printer
           (funcall printer stream (cdr term))
-          (print term stream))))
-)
+          (format stream "~A" term stream))))
+
 ;;(print (extract-options '(1 2) '(:f 2) ':g))
 ;;(print (extract-options '(1 2 :f 3 4 :g 5) '(:f 2) ':g))
 
+(defmacro with-error-context ((&rest context-description) &body body)
+  (let ((e (gensym)))
+    `(handler-bind
+       ((error (lambda (,e) (error "~A~%in context of: ~A"
+                                   ,e
+                                   (funcall #'format nil ,@context-description)))))
+       ,@body)))
 
-(defmacro defg (name &rest rules)
-  "rules:
-    (rule-name [:subtype rule-name] alt*) *
-   alt:
-    (alt-el*)
-   alt-el:
-    rule-name | string"
-  (assert (listp rules)) ;; TO DO add error messages
-  (let ((terminals (make-hash-table :test #'equal)) ;; string -> symbol
-        (printer-inits nil)
-        (print-table (gensym (mk-symbol-name name "-print-table")))
-        (print-func (intern (mk-symbol-name name "-print"))))
-    (labels ((%terminal (str &optional (quote t))
+(defstruct rule
+  (name      nil :type symbol)
+  (alts      nil :type list)
+  (supertype nil :type (or symbol nil))
+  (is-value  nil :type boolean))
+
+(defstruct alt
+  (constructor nil :type (or symbol nil))
+  (is-inline   nil :type boolean)
+  (symbols     nil :type list)) ;; list of symb
+
+(defstruct symb 
+  (name              nil :type symbol)
+  (is-ignored-in-ast nil :type boolean)
+  (string            nil :type (or (satisfies null) (satisfies stringp))))
+
+;; TODO: yacc:define-parser defines it's own "defstruct grammar"
+;;       will have to put these to different packages and rename "grammar1" to "grammar"
+(defstruct grammar1
+  (name      nil :type symbol)
+  (rules     nil :type list)
+  (terminals (make-hash-table :test #'equal) :type hash-table)
+  (start     nil :type (or symbol nil))
+  (start-map nil :type list))
+
+(defun new-grammar1 (g &key name rules terminals start start-map)
+  (let ((g1 (copy-grammar1 g)))
+    (setf (grammar1-name g1) (or name (grammar1-name g))
+          (grammar1-rules g1) (or rules (grammar1-rules g))
+          (grammar1-terminals g1) (or terminals (grammar1-terminals g))
+          (grammar1-start g1) (or start (grammar1-start g))
+          (grammar1-start-map g1) (or start-map (grammar1-start-map g)))
+    g1))
+
+(defun parse-grammar1 (s-expr)
+  (let ((name (car s-expr))
+        (rules (cdr s-expr))
+        (terminals (make-hash-table :test #'equal))) ;; string -> symbol
+    (assert (symbolp name))
+    (assert (listp rules))
+    (labels ((%terminal (str &key (quote t))
                (let ((str (if quote
                             (cl-ppcre:quote-meta-chars str)
                             str)))
                  (or (gethash str terminals)
                      (setf (gethash str terminals) (gensym str)))))
+
              (%parse-rule (rule)
-               "returns rule in the cl-yacc form:
-                  (rule-name alt*)"
-               (assert (listp rule)) ;; TO DO add error messages
-               (assert (symbolp (first rule)))
-               (let ((name (car rule)))
-                 (multiple-value-bind (alts1 value subtype)
-                                      (extract-options (cdr rule) ':value '(:subtype 1))
-;;                    (format t "alts1=~A value=~A~%" alts1 terminal)
-                    (let ((alts (mapcar (lambda (a) (%parse-alt (symbol-name name) a))
-                                        (if value
-                                          (progn
-                                            (assert (stringp (car alts1)))
-                                            (list (list (%terminal (car alts1) nil))))
-                                          alts1))))
-                      `(,name ,@alts)))))
-             (%parse-alt (base-name alt)
-               "returns rule alternative in the cl-yacc form:
-                  (rule-name+ (lambda (x1 x2 x3 ...) (list 'constructor-name y1 y2 y3 ...)))
-                where Ys are Xs that are not terminals"
-               (let* ((constructor (gensym base-name)) ;; TO DO put it into grammar package
-                      ;; list of (body-el x y)
-                      (body (mapcar (lambda (el)
-                                      (cond
-                                        ((symbolp el)
-                                           (let ((x (gensym "x")))
-                                             (list el x x)))
-                                        ((stringp el)
-                                           (list (%terminal el) (gensym "_") nil))
-                                        (t (error "Alternative element has to be symbol or string ~
-                                                   but ~A of type ~A found, while parsing rule ~A"
-                                                  el (type-of el) base-name))))
-                                    alt))
-                      (stream (gensym "stream"))
-                      (term (gensym "term"))
-                      (number 0)
-                      (printer-statements (mapcar (lambda (non-terminal notation)
-                                                    (if non-terminal
-                                                      (prog1
-                                                        `(,print-func ,stream (nth ,number ,term))
-                                                        (incf number))
-                                                      `(write-string ,notation ,stream)))
-                                                  (mapcar #'third body)
-                                                  alt))
-                      (names (mapcar #'first body))
-                      (xs (mapcar #'second body))
-                      (ys (remove nil (mapcar #'third body))))
-                 (push `(setf (gethash ',constructor ,print-table)
-                              (lambda (,stream ,term)
-                                (progn ,@printer-statements)))
-                       printer-inits)
-                 `(,@names (lambda ,xs (list ',constructor ,@ys))))))
-      (let* ((rules (mapcar #'%parse-rule rules))
-             (start (caar rules))
-             (parser-name (gensym (mk-symbol-name name "-parser")))
-             (lexer-name (gensym (mk-symbol-name name "-lexer")))
-             (parse-string-func (intern (mk-symbol-name name "-parse-string")))
-             (parse-stream-func (intern (mk-symbol-name name "-parse-stream")))
-             (lexer-rules nil)
-             (term (gensym "term"))
-             (str (gensym "str"))
-             (stream (gensym "stream"))
-             (stream1 (gensym "stream")))
-        (maphash (lambda (regex symb)
-                   (push `(,regex (return (values ',symb $@)))
-                         lexer-rules))
-                 terminals)
-        `(progn
-           (cl-lex:define-string-lexer ,lexer-name
-                                       ,@lexer-rules)
-           (yacc:define-parser ,parser-name
-                               (:start-symbol ,start)
-                               (:terminals ,(hash-values terminals))
-                               ,@rules)
-           (defun ,parse-string-func (,str)
-             (yacc:parse-with-lexer (,lexer-name ,str) ,parser-name))
-           (defun ,parse-stream-func (,stream)
-             (yacc:parse-with-lexer (stream-lexer #'read-line #',lexer-name (lambda () nil) (lambda () nil) :stream ,stream)
-                                    ,parser-name))
-           (defvar ,print-table (make-hash-table :test #'eq))
-           (progn ,@printer-inits)
-           (defun ,print-func (,stream1 ,term)
-             (print-term ,stream1 ,print-table ,term)))))))
+               (with-error-context ("rule: ~A" rule)
+                 (assert (listp rule)) ;; TO DO add error messages
+                 (let ((name (car rule))
+                       (alts (cdr rule)))
+                   (assert name)
+                   (assert (symbolp name))
+                   (assert (listp alts))
+                   (multiple-value-bind (alts value supertype)
+                                        (extract-options alts ':value '(:super 1))
+                      (let ((alts (if value
+                                    (progn
+                                      (assert (stringp (car alts)))
+                                      (assert (null (cdr alts)))
+                                      (list
+                                        (%parse-alt (symbol-name name)
+                                                    (list (%terminal (car alts) :quote nil)))))
+                                    (mapcar (lambda (a) (%parse-alt (symbol-name name) a))
+                                            alts))))
+                        (make-rule
+                          :name name
+                          :alts alts
+                          :supertype (car supertype)
+                          :is-value value))))))
+             (%parse-alt (base-name symbols)
+               (with-error-context ("alternative: ~A" symbols)
+                 (assert (listp symbols) () "expected symbols to be of type list, but actual type is ~A" (type-of symbols))
+                 (multiple-value-bind (symbols inline) (extract-options symbols '(:inline 1))
+                   (make-alt
+                     :constructor (unless inline (gensym base-name))
+                     :is-inline inline
+                     :symbols (mapcar (lambda (el)
+                                     (cond
+                                       ((symbolp el) (make-symb :name el))
+                                       ((stringp el) (make-symb :name (%terminal el)
+                                                                :is-ignored-in-ast t
+                                                                :string el))
+                                       (t (error "Alternative element has to be symbol or string ~
+                                                 but ~A of type ~A found, while parsing rule ~A"
+                                                 el (type-of el) base-name))))
+                                 symbols))))))
+  (make-grammar1
+    :name name 
+    :rules (mapcar #'%parse-rule rules)
+    :terminals terminals))))
 
+(defun make-first-rule (grammar1)
+  (let* ((rules (remove-if #'rule-supertype
+                           (grammar1-rules grammar1)))
+         (start (gensym "START"))
+         (start-map (mapcar (lambda (rule)
+                              (let ((name (rule-name rule)))
+                                (cons name (gensym (mk-symbol-name "start-" name)))))
+                            rules)))
+    (new-grammar1 grammar1
+       :rules (cons (make-rule
+                      :name start
+                      :alts (mapcar
+                              (lambda (el)
+                                (make-alt
+                                  :constructor (cdr el)
+                                  :symbols (list
+                                             (make-symb :name (cdr el)
+                                                        :is-ignored-in-ast t)
+                                             (make-symb :name (car el)))
+                                  :is-inline t))
+                              start-map))
+                      (grammar1-rules grammar1))
+       :start start
+       :start-map start-map)))
 
-(defmacro print-and-expand (what)
+(defun make-yacc-alt-ast-function (alt)
+  (let* ((pairs (mapcar (lambda (s)
+                          (let ((arg (gensym "X")))
+                            (cons arg
+                                  (unless (symb-is-ignored-in-ast s)
+                                    arg))))
+                        (alt-symbols alt)))
+         (args (mapcar #'car pairs))
+         (vals (remove nil (mapcar #'cdr pairs))))
+    `(lambda ,args
+       ,(if (alt-is-inline alt)
+          (car (last vals))
+          `(list ',(alt-constructor alt)
+                 ,@vals)))))
+
+(defun make-yacc-alt (alt)
+  `(,@(mapcar #'symb-name (alt-symbols alt))
+     ,(make-yacc-alt-ast-function alt)))
+
+(defun make-yacc-rule (rule)
+  `(,(rule-name rule)
+     ,@(mapcar #'make-yacc-alt (rule-alts rule))))
+
+(defun make-yacc-parser-spec (grammar1 parser-name)
+  `(yacc:define-parser ,parser-name
+                       (:start-symbol ,(grammar1-start grammar1))
+                       (:terminals ,(append
+                                      (hash-values (grammar1-terminals grammar1))
+                                      (mapcar #'cdr (grammar1-start-map grammar1))))
+                       ,@(mapcar #'make-yacc-rule (grammar1-rules grammar1))))
+
+(defun make-lex-string-lexer (grammar1 lexer-name)
+  (let ((lexer-rules nil))
+    (maphash (lambda (regex symb)
+               (push `(,regex (return (values ',symb $@)))
+                     lexer-rules))
+             (grammar1-terminals grammar1))
+    `(cl-lex:define-string-lexer ,lexer-name
+                                 ,@lexer-rules)))
+
+(defun make-mk-lexer (mk-lexer-name string-lexer-name)
+  (let ((str (gensym "STR"))
+        (func (gensym "FUNC"))
+        (start-symbol (gensym "START-SYMBOL"))
+        (first-call (gensym "FIRST-CALL")))
+    `(defun ,mk-lexer-name (,start-symbol ,str)
+       (let ((,func (,string-lexer-name ,str))
+             (,first-call t))
+         (lambda ()
+           (if ,first-call
+             (progn
+               (setf ,first-call nil)
+               ,start-symbol)
+             (funcall ,func)))))))
+
+(defun make-parse-string (parse-string-name parser-name mk-lexer-name start-map)
+  (let ((str (gensym "STR"))
+        (start-symbol (gensym "START-SYMBOL"))
+        (kind (gensym "KIND")))
+    `(defun ,parse-string-name (,kind ,str)
+       (yacc:parse-with-lexer
+         (let ((,start-symbol (cdr (assoc ,kind ,start-map))))
+           (assert ,start-symbol)
+           (,mk-lexer-name ,start-symbol ,str))
+         ,parser-name))))
+
+;; TODO: assert that symb-is-ignored-in-ast can't be inline
+
+(defun make-alt-printer-function (alt printer-name)
+  (let ((term (gensym "TERM"))
+        (stream (gensym "STREAM"))
+        (number 0))
+    (if (alt-is-inline alt)
+      `(lambda (,stream ,term)
+         (,printer-name ,stream (last ,term)))
+      `(lambda (,stream ,term)
+         ,@(mapcar (lambda (s)
+                     (if (symb-is-ignored-in-ast s)
+                       `(write-string ,(symb-string s) ,stream)
+                       (prog1
+                         `(,printer-name ,stream (nth ,number ,term))
+                         (incf number))))
+                   (alt-symbols alt))))))
+
+(defun make-printer (printer-name print-table)
+  (let ((stream (gensym "STREAM"))
+        (term (gensym "TERM")))
+    `(defun ,printer-name (,stream ,term)
+       (print-term ,stream ,print-table ,term))))
+
+(defun make-print-table-init (grammar1 print-table printer-name)
   `(progn
-     (pprint (macroexpand (quote ,what)))
-     ,what))
+     ,@(mapcan (lambda (rule)
+                 (mapcar (lambda (alt)
+                           `(setf (gethash ',(alt-constructor alt)
+                                           ,print-table)
+                                  ,(make-alt-printer-function alt printer-name)))
+                         (rule-alts rule)))
+               (grammar1-rules grammar1))))
 
-(print-and-expand
-      (defg zulu
-            (expr (expr1)
-                  (expr1 "+" expr)
-                  (expr1 "-" expr))
+(defun make-grammar1-defs (grammar1)
+  (let* ((gname (grammar1-name grammar1))
+         (parser-name (gensym (mk-symbol-name gname "-parser")))
+         (string-lexer-name (gensym (mk-symbol-name gname "-string-lexer")))
+         (mk-lexer-name (gensym (mk-symbol-name "mk-" gname "-lexer")))
+         (parse-string-name (intern (mk-symbol-name gname "-parse-string")))
+         (start-map (gensym (mk-symbol-name gname "-start-map")))
+         (printer-name (intern (mk-symbol-name gname "-print")))
+         (print-table (gensym (mk-symbol-name gname "-print-table"))))
+  `(progn
+    (defvar ,start-map ',(grammar1-start-map grammar1))
+    (defvar ,print-table (make-hash-table :test #'eq))
+    ,(make-print-table-init grammar1 print-table printer-name)
+    ,(make-yacc-parser-spec grammar1 parser-name)
+    ,(make-lex-string-lexer grammar1 string-lexer-name)
+    ,(make-mk-lexer mk-lexer-name string-lexer-name)
+    ,(make-parse-string parse-string-name parser-name mk-lexer-name start-map)
+    ,(make-printer printer-name print-table)
+    )))
 
-            (expr1 :subtype expr
-                   (expr2)
-                   (expr2 "*" expr1)
-                   (expr2 "/" expr1))
+)
 
-            (expr2 :subtype expr
-                   ("(" expr ")")
-                   (id)
-                   (int))
+(defmacro defg (name &rest rules)
+  (let ((defs (make-grammar1-defs
+                (make-first-rule
+                  (parse-grammar1 (cons name rules))))))
+    (print "-- DEFS DUMP START --")
+    (print defs)
+    (print "-- DEFS DUMP END --")
+    (print "")
+    defs
+    ))
 
-            (id :value "[_a-z][_a-zA-Z0-9]*")
-            (int :value "[0-9]+")))
+(defg zulu
+        (expr (expr1) ;; put inline here
+              (expr1 "+" expr)
+              (expr1 "-" expr))
 
-;;(print (zulu-parse-string "22 * 1 + 33 * 2"))
-(let ((e (zulu-parse-string "gg * 2 + 1 + ( 211 )")))
-  (pprint e)
-  (zulu-print *standard-output* e))
+        (expr1 :super expr
+               (expr2)
+               (expr2 "*" expr1)
+               (expr2 "/" expr1))
+
+        (expr2 :super expr
+               ("(" expr ")")
+               (id)
+               (int))
+
+        (id :value "[_a-z][_a-zA-Z0-9]*")
+        (int :value "[0-9]+")
+        )
+
+(let ((e (zulu-parse-string 'expr "gg * 2 + 1 + ( 211 )")))
+  (print e)
+  (print "")
+  (zulu-print *standard-output* e)
+  (print ""))
+
+;; TODO
+;;           (defun ,parse-stream-func (,stream)
+;;             (yacc:parse-with-lexer (stream-lexer #'read-line #',lexer-name (lambda () nil) (lambda () nil) :stream ,stream)
