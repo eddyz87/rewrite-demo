@@ -60,7 +60,7 @@
                           (gethash (car term) print-table))))
         (if printer
           (funcall printer stream (cdr term))
-          (format stream "~A" term stream))))
+          (format stream "~A " term stream))))
 
 ;;(print (extract-options '(1 2) '(:f 2) ':g))
 ;;(print (extract-options '(1 2 :f 3 4 :g 5) '(:f 2) ':g))
@@ -79,6 +79,14 @@
   (supertype nil :type (or symbol nil))
   (is-value  nil :type boolean))
 
+(defun new-rule (rule &key name alts supertype is-value)
+  (let ((r1 (copy-rule rule)))
+    (setf (rule-name r1) (or name (rule-name rule))
+          (rule-alts r1) (or alts (rule-alts rule))
+          (rule-supertype r1) (or supertype (rule-supertype rule))
+          (rule-is-value r1) (or is-value (rule-is-value rule)))
+    r1))
+
 (defstruct alt
   (constructor nil :type (or symbol nil))
   (is-inline   nil :type boolean)
@@ -92,19 +100,21 @@
 ;; TODO: yacc:define-parser defines it's own "defstruct grammar"
 ;;       will have to put these to different packages and rename "grammar1" to "grammar"
 (defstruct grammar1
-  (name      nil :type symbol)
-  (rules     nil :type list)
-  (terminals (make-hash-table :test #'equal) :type hash-table)
-  (start     nil :type (or symbol nil))
-  (start-map nil :type list))
+  (name            nil :type symbol)
+  (rules           nil :type list)
+  (terminals       (make-hash-table :test #'equal) :type hash-table)
+  (start           nil :type (or symbol nil))
+  (start-map       nil :type list)
+  (meta-var-starts nil :type list))
 
-(defun new-grammar1 (g &key name rules terminals start start-map)
+(defun new-grammar1 (g &key name rules terminals start start-map meta-var-starts)
   (let ((g1 (copy-grammar1 g)))
     (setf (grammar1-name g1) (or name (grammar1-name g))
           (grammar1-rules g1) (or rules (grammar1-rules g))
           (grammar1-terminals g1) (or terminals (grammar1-terminals g))
           (grammar1-start g1) (or start (grammar1-start g))
-          (grammar1-start-map g1) (or start-map (grammar1-start-map g)))
+          (grammar1-start-map g1) (or start-map (grammar1-start-map g))
+          (grammar1-meta-var-starts g1) (or meta-var-starts (grammar1-meta-var-starts g)))
     g1))
 
 (defun parse-grammar1 (s-expr)
@@ -113,18 +123,21 @@
         (terminals (make-hash-table :test #'equal))) ;; string -> symbol
     (assert (symbolp name))
     (assert (listp rules))
-    (labels ((%terminal (str &key (quote t))
+    (labels ((%terminal (str &key (quote t) name)
                (let ((str (if quote
                             (cl-ppcre:quote-meta-chars str)
                             str)))
                  (or (gethash str terminals)
-                     (setf (gethash str terminals) (gensym str)))))
+                     (setf (gethash str terminals) (if name
+                                                     name
+                                                     (gensym str))))))
 
              (%parse-rule (rule)
                (with-error-context ("rule: ~A" rule)
                  (assert (listp rule)) ;; TO DO add error messages
-                 (let ((name (car rule))
-                       (alts (cdr rule)))
+                 (let* ((name (car rule))
+                        (alts (cdr rule))
+                        (is-meta (eq name 'meta-var)))
                    (assert name)
                    (assert (symbolp name))
                    (assert (listp alts))
@@ -136,7 +149,12 @@
                                       (assert (null (cdr alts)))
                                       (list
                                         (%parse-alt (symbol-name name)
-                                                    (list (%terminal (car alts) :quote nil)))))
+                                                    (list (%terminal
+                                                            (car alts)
+                                                            :quote nil
+                                                            :name (when is-meta 'meta-var-terminal)))
+                                                    :constructor (when is-meta 'meta-var-constructor)
+                                                    )))
                                     (mapcar (lambda (a) (%parse-alt (symbol-name name) a))
                                             alts))))
                         (make-rule
@@ -144,12 +162,14 @@
                           :alts alts
                           :supertype (car supertype)
                           :is-value value))))))
-             (%parse-alt (base-name symbols)
+
+             (%parse-alt (base-name symbols &key constructor)
                (with-error-context ("alternative: ~A" symbols)
                  (assert (listp symbols) () "expected symbols to be of type list, but actual type is ~A" (type-of symbols))
                  (multiple-value-bind (symbols inline) (extract-options symbols '(:inline 1))
                    (make-alt
-                     :constructor (unless inline (gensym base-name))
+                     :constructor (or constructor
+                                      (unless inline (gensym base-name)))
                      :is-inline inline
                      :symbols (mapcar (lambda (el)
                                      (cond
@@ -161,10 +181,15 @@
                                                  but ~A of type ~A found, while parsing rule ~A"
                                                  el (type-of el) base-name))))
                                  symbols))))))
-  (make-grammar1
-    :name name 
-    :rules (mapcar #'%parse-rule rules)
-    :terminals terminals))))
+      ;; TODO: check that meta-var is present only once
+      (let* ((rules (mapcar #'%parse-rule rules))
+             (meta-var (find 'meta-var rules :key #'rule-name)))
+        (assert meta-var)
+        (make-grammar1
+          :name name 
+          :rules rules 
+          :terminals terminals)
+        ))))
 
 (defun make-first-rule (grammar1)
   (let* ((rules (remove-if #'rule-supertype
@@ -190,6 +215,30 @@
                       (grammar1-rules grammar1))
        :start start
        :start-map start-map)))
+
+(defun insert-meta-vars (grammar1)
+  (let ((meta-var-starts))
+    (new-grammar1 grammar1
+      :rules (mapcar (lambda (rule)
+                       (if (or (rule-is-value rule)
+                               (rule-supertype rule))
+                         rule
+                         (new-rule
+                           rule
+                           :alts (cons (make-alt
+                                         ;;:constructor (gensym (mk-symbol-name (rule-name rule) "-meta"))
+                                         :is-inline t
+                                         :symbols (progn
+                                                    (let ((start (gensym (mk-symbol-name (rule-name rule) "-meta-start"))))
+                                                      (push (cons (rule-name rule) start) meta-var-starts)
+                                                      (list
+                                                        (make-symb :name start
+                                                                   :is-ignored-in-ast t
+                                                                   :string "")
+                                                        (make-symb :name 'meta-var)))))
+                                       (rule-alts rule)))))
+                     (grammar1-rules grammar1))
+      :meta-var-starts meta-var-starts)))
 
 (defun make-yacc-alt-ast-function (alt)
   (let* ((pairs (mapcar (lambda (s)
@@ -219,7 +268,8 @@
                        (:start-symbol ,(grammar1-start grammar1))
                        (:terminals ,(append
                                       (hash-values (grammar1-terminals grammar1))
-                                      (mapcar #'cdr (grammar1-start-map grammar1))))
+                                      (mapcar #'cdr (grammar1-start-map grammar1))
+                                      (mapcar #'cdr (grammar1-meta-var-starts grammar1))))
                        ,@(mapcar #'make-yacc-rule (grammar1-rules grammar1))))
 
 (defun make-lex-string-lexer (grammar1 lexer-name)
@@ -231,20 +281,41 @@
     `(cl-lex:define-string-lexer ,lexer-name
                                  ,@lexer-rules)))
 
-(defun make-mk-lexer (mk-lexer-name string-lexer-name)
+(defvar *meta-var-types* nil)
+
+(defun lookup-meta-var-type (name)
+  (cdr (assoc name *meta-var-types* :test #'string=)))
+
+(defun make-mk-lexer (grammar1 mk-lexer-name string-lexer-name)
   (let ((str (gensym "STR"))
         (func (gensym "FUNC"))
         (start-symbol (gensym "START-SYMBOL"))
-        (first-call (gensym "FIRST-CALL")))
+        (first-call (gensym "FIRST-CALL"))
+        (next (gensym "NEXT"))
+        (symb (gensym "SYMB"))
+        (val (gensym "VAL"))
+        (tmp (gensym "TMP")))
     `(defun ,mk-lexer-name (,start-symbol ,str)
        (let ((,func (,string-lexer-name ,str))
-             (,first-call t))
+             (,next (cons ,start-symbol nil)))
          (lambda ()
-           (if ,first-call
-             (progn
-               (setf ,first-call nil)
-               ,start-symbol)
-             (funcall ,func)))))))
+           (if ,next
+             (let ((,tmp ,next))
+               (setf ,next nil)
+               (values (car ,tmp) (cdr ,tmp)))
+             (multiple-value-bind (,symb ,val) (funcall ,func)
+               (if (eq ,symb 'meta-var-terminal)
+                 (progn
+                   (setf ,next (cons ,symb ,val))
+                   (values
+                     (case (lookup-meta-var-type ,val)
+                       ,@(mapcar (lambda (el) `(,(car el) ',(cdr el)))
+                                 (grammar1-meta-var-starts grammar1))
+                        (t (error "unknown meta-var type: ~A"
+                                  (lookup-meta-var-type ,val))))
+                     nil))
+                 (values ,symb ,val)))))
+         ))))
 
 (defun make-parse-string (parse-string-name parser-name mk-lexer-name start-map)
   (let ((str (gensym "STR"))
@@ -269,7 +340,9 @@
       `(lambda (,stream ,term)
          ,@(mapcar (lambda (s)
                      (if (symb-is-ignored-in-ast s)
-                       `(write-string ,(symb-string s) ,stream)
+                       `(progn
+                          (write-string ,(symb-string s) ,stream)
+                          (write-string " " ,stream))
                        (prog1
                          `(,printer-name ,stream (nth ,number ,term))
                          (incf number))))
@@ -306,7 +379,7 @@
     ,(make-print-table-init grammar1 print-table printer-name)
     ,(make-yacc-parser-spec grammar1 parser-name)
     ,(make-lex-string-lexer grammar1 string-lexer-name)
-    ,(make-mk-lexer mk-lexer-name string-lexer-name)
+    ,(make-mk-lexer grammar1 mk-lexer-name string-lexer-name)
     ,(make-parse-string parse-string-name parser-name mk-lexer-name start-map)
     ,(make-printer printer-name print-table)
     )))
@@ -316,7 +389,8 @@
 (defmacro defg (name &rest rules)
   (let ((defs (make-grammar1-defs
                 (make-first-rule
-                  (parse-grammar1 (cons name rules))))))
+                  (insert-meta-vars
+                    (parse-grammar1 (cons name rules)))))))
     (print "-- DEFS DUMP START --")
     (print defs)
     (print "-- DEFS DUMP END --")
@@ -341,9 +415,17 @@
 
         (id :value "[_a-z][_a-zA-Z0-9]*")
         (int :value "[0-9]+")
+        (meta-var :value "\\?[_a-z][_a-zA-Z0-9]*")
         )
 
 (let ((e (zulu-parse-string 'expr "gg * 2 + 1 + ( 211 )")))
+  (print e)
+  (print "")
+  (zulu-print *standard-output* e)
+  (print ""))
+
+(let* ((*meta-var-types* (list (cons "?e" 'expr)))
+       (e (zulu-parse-string 'expr "gg * 2 + 1 + ( ?e )")))
   (print e)
   (print "")
   (zulu-print *standard-output* e)
