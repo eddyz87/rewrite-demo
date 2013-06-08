@@ -166,11 +166,11 @@
              (%parse-alt (base-name symbols &key constructor)
                (with-error-context ("alternative: ~A" symbols)
                  (assert (listp symbols) () "expected symbols to be of type list, but actual type is ~A" (type-of symbols))
-                 (multiple-value-bind (symbols inline) (extract-options symbols '(:inline 1))
+                 (multiple-value-bind (symbols inline) (extract-options symbols '(:inline 0))
                    (make-alt
                      :constructor (or constructor
                                       (unless inline (gensym base-name)))
-                     :is-inline inline
+                     :is-inline (not (not inline))
                      :symbols (mapcar (lambda (el)
                                      (cond
                                        ((symbolp el) (make-symb :name el))
@@ -220,8 +220,8 @@
   (let ((meta-var-starts))
     (new-grammar1 grammar1
       :rules (mapcar (lambda (rule)
-                       (if (or (rule-is-value rule)
-                               (rule-supertype rule))
+                       ;; add meta var only if rule has no references to inline rules
+                       (if (some #'alt-is-inline (rule-alts rule))
                          rule
                          (new-rule
                            rule
@@ -230,7 +230,10 @@
                                          :is-inline t
                                          :symbols (progn
                                                     (let ((start (gensym (mk-symbol-name (rule-name rule) "-meta-start"))))
-                                                      (push (cons (rule-name rule) start) meta-var-starts)
+                                                      (push (cons (or (rule-supertype rule)
+                                                                      (rule-name rule))
+                                                                  start)
+                                                            meta-var-starts)
                                                       (list
                                                         (make-symb :name start
                                                                    :is-ignored-in-ast t
@@ -304,6 +307,7 @@
                (setf ,next nil)
                (values (car ,tmp) (cdr ,tmp)))
              (multiple-value-bind (,symb ,val) (funcall ,func)
+               ;;(format t "lexer: next=~A symb=~A val=~A~%" ,next ,symb ,val)
                (if (eq ,symb 'meta-var-terminal)
                  (progn
                    (setf ,next (cons ,symb ,val))
@@ -399,12 +403,12 @@
     ))
 
 (defg zulu
-        (expr (expr1) ;; put inline here
+        (expr (:inline expr1)
               (expr1 "+" expr)
               (expr1 "-" expr))
 
         (expr1 :super expr
-               (expr2)
+               (:inline expr2)
                (expr2 "*" expr1)
                (expr2 "/" expr1))
 
@@ -418,6 +422,7 @@
         (meta-var :value "\\?[_a-z][_a-zA-Z0-9]*")
         )
 
+;;(let ((e (zulu-parse-string 'expr "1")))
 (let ((e (zulu-parse-string 'expr "gg * 2 + 1 + ( 211 )")))
   (print e)
   (print "")
