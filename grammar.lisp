@@ -1,6 +1,9 @@
 (in-package :rw)
-;; TO DO:
-;; unit tests ?
+;; TODO:
+;; - unit tests
+;; - super/inline checks
+;; - pattern meta programming
+;; - null alts in the printer
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   
