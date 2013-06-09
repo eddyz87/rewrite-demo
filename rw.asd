@@ -5,6 +5,6 @@
 
 (asdf:defsystem rw
   :name "rw"
-  :depends-on ("yacc" "cl-lex" "cl-ppcre")
+  :depends-on ("yacc" "cl-lex" "cl-ppcre" "optima")
   :components ((:file "rw-package")
                (:file "grammar" :depends-on ("rw-package"))))

@@ -123,17 +123,19 @@
 (defun parse-grammar1 (s-expr)
   (let ((name (car s-expr))
         (rules (cdr s-expr))
-        (terminals (make-hash-table :test #'equal))) ;; string -> symbol
+        (terminals (make-hash-table :test #'equal))) ;; string -> (cons symbol . transformation func)
     (assert (symbolp name))
     (assert (listp rules))
-    (labels ((%terminal (str &key (quote t) name)
+    (labels ((%terminal (str &key (quote t) name transform)
                (let ((str (if quote
                             (cl-ppcre:quote-meta-chars str)
                             str)))
-                 (or (gethash str terminals)
-                     (setf (gethash str terminals) (if name
-                                                     name
-                                                     (gensym str))))))
+                 (car (or (gethash str terminals)
+                          (setf (gethash str terminals) (cons (if name
+                                                                name
+                                                                (gensym str))
+                                                              (or transform
+                                                                  'identity)))))))
 
              (%parse-rule (rule)
                (with-error-context ("rule: ~A" rule)
@@ -155,8 +157,9 @@
                                                     (list (%terminal
                                                             (car alts)
                                                             :quote nil
-                                                            :name (when is-meta 'meta-var-terminal)))
-                                                    :constructor (when is-meta 'meta-var-constructor)
+                                                            :name (when is-meta 'meta-var-terminal)
+                                                            :transform (when is-meta 'intern)))
+                                                    :constructor (when is-meta 'variable)
                                                     )))
                                     (mapcar (lambda (a) (%parse-alt (symbol-name name) a))
                                             alts))))
@@ -273,16 +276,18 @@
   `(yacc:define-parser ,parser-name
                        (:start-symbol ,(grammar1-start grammar1))
                        (:terminals ,(append
-                                      (hash-values (grammar1-terminals grammar1))
+                                      (mapcar #'car (hash-values (grammar1-terminals grammar1)))
                                       (mapcar #'cdr (grammar1-start-map grammar1))
                                       (mapcar #'cdr (grammar1-meta-var-starts grammar1))))
                        ,@(mapcar #'make-yacc-rule (grammar1-rules grammar1))))
 
 (defun make-lex-string-lexer (grammar1 lexer-name)
   (let ((lexer-rules nil))
-    (maphash (lambda (regex symb)
-               (push `(,regex (return (values ',symb $@)))
-                     lexer-rules))
+    (maphash (lambda (regex pair)
+               (let ((symb (car pair))
+                     (transform (cdr pair)))
+                 (push `(,regex (return (values ',symb (,transform $@))))
+                       lexer-rules)))
              (grammar1-terminals grammar1))
     `(cl-lex:define-string-lexer ,lexer-name
                                  ,@lexer-rules)))
@@ -399,7 +404,7 @@
                   (insert-meta-vars
                     (parse-grammar1 (cons name rules)))))))
     (print "-- DEFS DUMP START --")
-    (print defs)
+;;    (print defs)
     (print "-- DEFS DUMP END --")
     (print "")
     defs
@@ -432,13 +437,35 @@
   (zulu-print *standard-output* e)
   (print ""))
 
-(let* ((*meta-var-types* (list (cons "?e" 'expr)))
+(let* ((*meta-var-types* (list (cons '|?e| 'expr)))
        (e (zulu-parse-string 'expr "gg * 2 + 1 + ( ?e )")))
   (print e)
   (print "")
   (zulu-print *standard-output* e)
   (print ""))
+#|
+(defun z (kind str) (zulu-parse-string kind str))
 
+(defun match (term vars &rest clauses)
+  (let* ((*meta-var-types* (mapcar (lambda (v) (cons (first v) (second v)))
+                                   vars))
+         (clauses (mapcar (lambda (c)
+                            (let ((term (eval (car c)))
+                                  (body (cdr c)))
+                              `(,term ,@body)))
+                          clauses)))
+    (format t "clauses=~A~%" clauses)
+    (eval `(optima:match ,term ,@clauses))))
+
+(or 
+  (match (z 'expr "gg * 2 + 1 + ( 211 )") '((|?e| expr))
+         '((z 'expr "gg * 2 + 1 + ( ?e )")
+           (print "")
+           (print "match on ?e")
+           (print |?e|)
+           (print "")
+           t))
+  (print "no match"))|#
 ;; TODO
 ;;           (defun ,parse-stream-func (,stream)
 ;;             (yacc:parse-with-lexer (stream-lexer #'read-line #',lexer-name (lambda () nil) (lambda () nil) :stream ,stream)
