@@ -8,6 +8,7 @@ There is a not tested probability that quicklisp would load all dependencies by 
 in case if this is not true, manual installation looks like:
   (ql:quickload "yacc")
   (ql:quickload "cl-lex")
+  (ql:quickload "optima")
 
 To run the project issue:
   sbcl --script init.lisp 2>&1 | less
